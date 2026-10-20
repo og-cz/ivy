@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="database/_README/ivy-header.gif" alt="Ivy Header"/>
+  <picture><source srcset="database/_README/ivy-header.gif" type="image/gif"><img src="database/_README/posters/ivy-header.jpg" alt="Ivy Header" /></picture>
 </div>
 
 # About
@@ -13,7 +13,7 @@ It is more than a virtual assistant it’s a concept of a personal digital compa
 ---
 
 <br>
-<img src="database/_README/introducing.gif" width="100%">
+<picture><source srcset="database/_README/introducing.gif" type="image/gif"><img src="database/_README/posters/introducing.jpg" width="100%" /></picture>
 <br>
 
 ## Installation
@@ -83,23 +83,23 @@ If you wish to add a command just go to lib/main/command.py
 
 This face authentication is available at lib/auth/\* , if you wish to generate a face authentication for youself go to trainer.py and generate a face authentication for yourself
 
-<img src="database/_README/face-authentication.gif" width="70%">
+<picture><source srcset="database/_README/face-authentication.gif" type="image/gif"><img src="database/_README/posters/face-authentication.jpg" width="70%" /></picture>
 
 #### Device information:
 
-<img src="database/_README/device.gif" width="70%">
+<picture><source srcset="database/_README/device.gif" type="image/gif"><img src="database/_README/posters/device.jpg" width="70%" /></picture>
 
 ### Voice features:
 
-<img src="database/_README/voice-feature.gif" width="70%">
+<picture><source srcset="database/_README/voice-feature.gif" type="image/gif"><img src="database/_README/posters/voice-feature.jpg" width="70%" /></picture>
 
 ### Web Commands:
 
-<img src="database/_README/web.gif" width="70%">
+<picture><source srcset="database/_README/web.gif" type="image/gif"><img src="database/_README/posters/web.jpg" width="70%" /></picture>
 
 ### App Commands:
 
-<img src="database/_README/app.gif" width="70%">
+<picture><source srcset="database/_README/app.gif" type="image/gif"><img src="database/_README/posters/app.jpg" width="70%" /></picture>
 
 ## Credits
 
