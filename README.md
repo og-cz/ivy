@@ -18,10 +18,12 @@ It is more than a virtual assistant it’s a concept of a personal digital compa
 
 ## Installation
 
+Use **Python 3.10 to 3.12**. PyAudio and some of the speech libraries don't ship builds for newer versions yet.
+
 It's recommended to use a virtual environment to keep dependencies isolated
 
 ```bash
-py -m venv venvivy
+py -3.12 -m venv venvivy
 ```
 
 Then, if you have installed to activate
@@ -39,7 +41,14 @@ Install the required dependencies
 pip install -r requirements.txt
 ```
 
-If you are on VSCode you must select the python interpreter that you locally created e.g. "venivy"
+Create an `api.py` file in the project root with your own keys (it's git-ignored, so it never gets committed)
+
+```python
+PORCUPINE_API_KEY = "your-picovoice-access-key"  # https://console.picovoice.ai/
+NEWS_API = "your-newsapi-key"  # https://newsapi.org/
+```
+
+If you are on VSCode you must select the python interpreter that you locally created e.g. "venvivy"
 
 ## User Guide
 

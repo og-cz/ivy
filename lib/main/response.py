@@ -126,9 +126,9 @@ cannot_calculate = [
 error_in_allcommands = [
     "Oops, something went wrong on my end. Let's try that again!",
     "Unexpected error, I'm sorry, try again",
-    "Sorry, there was a I.V.Y. error, pleaste try again later",
-    "Ivy will fix herself shortly, I.V.Y. system errored, my apologies for this"
-    "It appears that I.V.Y. had a issue, please try again..."
+    "Sorry, there was a I.V.Y. error, please try again later",
+    "Ivy will fix herself shortly, I.V.Y. system errored, my apologies for this",
+    "It appears that I.V.Y. had a issue, please try again...",
     "I.V.Y. system malfunction, id: 8-4f6-9e6a-dasw5bc2",
     "Ivy Error id: 83196b-f063-4ff6-9e6a",
 ]

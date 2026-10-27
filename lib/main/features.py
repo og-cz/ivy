@@ -1,44 +1,43 @@
-import re
-from shlex import quote
-import struct
-import subprocess
-import webbrowser
-from playsound import playsound
-import eel
-import pvporcupine
-from lib.main.command import *
-import lib.main.response as response
-from lib.main.helper import *
+import json
 import os
-import pywhatkit as kit
-import sqlite3
-import pyautogui as autogui
-from rapidfuzz import process
-import time
-import pyaudio
-import traceback
 import random
 import re
-import json
+import sqlite3
+import struct
+import time
+import traceback
 import urllib.parse
+import webbrowser
+import eel
+import pvporcupine
+import pyaudio
+import pywhatkit as kit
+import pyautogui as autogui
+import requests
+from rapidfuzz import fuzz, process
+import config
+import lib.main.response as response
+from lib.main.command import speak
+from lib.main.helper import *
 from lib.utils.location import detect_city_via_ip
 
 con = sqlite3.connect("./database/ivy.db")
 cursor = con.cursor()
 
-try:
-    import config
-
-    DEFAULT_CITY = getattr(config, "DEFAULT_CITY", None)
-except Exception:
-    DEFAULT_CITY = None
+DEFAULT_CITY = getattr(config, "DEFAULT_CITY", None)
 
 
-# play assistant sound function
-@eel.expose
-def play_assistant_sound():
-    music_dir = "www\\assets\\audio\\start_sound.mp3"
-    playsound(music_dir)
+def _find_command(table, column, name):
+    """Exact match first, then fuzzy match so "spotfy" still finds "spotify"."""
+    cursor.execute(f"SELECT name, {column} FROM {table}")
+    rows = cursor.fetchall()
+    if not rows:
+        return None
+    names = [row[0].lower() for row in rows]
+    if name in names:
+        return rows[names.index(name)][1]
+    best = process.extractOne(name, names, scorer=fuzz.WRatio, score_cutoff=85)
+    return rows[best[2]][1] if best else None
 
 
 # for opening apps
@@ -52,31 +51,25 @@ def open_command(query):
     query = re.sub(r"[?!.,]", "", query)
     query = query.strip()
 
-    words = query.split()
-    if len(words) > 0:
-        app_name = words[-1]
-    else:
-        app_name = ""
-
-    if app_name != "":
-        app_name = clean_app_name(app_name)
+    if query:
+        # try the full name first ("visual studio code"), then the last word ("code")
+        candidates = [clean_app_name(query), clean_app_name(query.split()[-1])]
+        app_name = candidates[0]
         try:
-            # Check system commands first
-            cursor.execute("SELECT path FROM sys_command WHERE name = ?", (app_name,))
-            sys_results = cursor.fetchall()
+            for name in candidates:
+                # Check system commands first
+                path = _find_command("sys_command", "path", name)
+                if path:
+                    speak("Opening " + name)
+                    os.startfile(path)
+                    return
 
-            # Check web commands
-            cursor.execute("SELECT url FROM web_command WHERE name = ?", (app_name,))
-            web_results = cursor.fetchall()
-
-            if len(sys_results) != 0:
-                speak("Opening " + app_name)
-                os.startfile(sys_results[0][0])
-                return
-            elif len(web_results) != 0:
-                speak("Opening " + app_name)
-                webbrowser.open(web_results[0][0])
-                return
+                # Check web commands
+                url = _find_command("web_command", "url", name)
+                if url:
+                    speak("Opening " + name)
+                    webbrowser.open(url)
+                    return
             else:
                 speak(
                     random.choice(
@@ -109,7 +102,7 @@ def play_youtube(query):
 
 
 #  running in background
-def hotword(q=None):
+def hotword(q):
     porcupine = None
     paud = None
     audio_stream = None
@@ -145,20 +138,10 @@ def hotword(q=None):
                 if now - last_detected > cooldown:
                     print("Hotword detected!")
 
-                    if q is not None:
-                        q.put("hotword")
-                    else:
-                        import eel
-                        from lib.main.command import all_commands
-
-                        eel.spawn(all_commands)
-
+                    # the UI process picks this up and starts listening,
+                    # even when the Ivy window isn't focused
+                    q.put("hotword")
                     last_detected = now
-
-                    # simulate a shortcut key (example: Win + J)
-                    autogui.keyDown("ctrl")
-                    autogui.press("i")
-                    autogui.keyUp("ctrl")
     except Exception as e:
         print("Error:", repr(e))
         traceback.print_exc()
@@ -205,8 +188,9 @@ def findContact(query):
     contacts = cursor.fetchall()
     contact_names = [name.lower() for name, _ in contacts]
 
-    match, score, idx = process.extractOne(query, contact_names)
-    if score > 70:
+    best = process.extractOne(query, contact_names) if query and contacts else None
+    if best and best[1] > 70:
+        match, score, idx = best
         mobile_number_str = str(contacts[idx][1])
         print(f"Selected contact: {match}, Number: {mobile_number_str}")
         if not mobile_number_str.startswith(
@@ -233,20 +217,18 @@ def whatsApp(mobile_no, message, flag, name):
         message = ""
         ivy_message = f"Starting video call with {name}"
 
-    import re
-
     message = re.sub(r"'{2,}", "'", message)
     message = message.replace(".", "")
     message = message.strip()
 
-    encoded_message = quote(message)
-
-    whatsapp_url = f"whatsapp://send?phone={mobile_no}&text={encoded_message}"
-    full_command = f'start "" "{whatsapp_url}"'
+    whatsapp_url = (
+        f"whatsapp://send?phone={urllib.parse.quote(mobile_no)}"
+        f"&text={urllib.parse.quote(message)}"
+    )
 
     try:
-        subprocess.run(full_command, shell=True)
-        time.sleep(5)
+        os.startfile(whatsapp_url)
+        eel.sleep(5)
 
         autogui.hotkey("ctrl", "f")
         for _ in range(1, target_tab):
@@ -293,8 +275,6 @@ def _condition_matches(cond: str, is_sunny: bool, desc: str) -> bool:
 def answer_weather_query(query: str) -> None:
 
     from lib.utils.weather import get_city_weather
-    from lib.main.helper import extract_condition_from_query
-    from lib.main.command import speak
 
     city = _resolve_city_for_weather(query)
     if not city:
@@ -459,13 +439,8 @@ def InsertContacts(Name, MobileNo, Email, City):
 
 # getting time and date
 def get_time_date(query):
-    from lib.main.helper import extract_city_from_query
     from lib.utils.weather import get_city_weather
-    from lib.utils.location import detect_city_via_ip
     import datetime
-
-    import random
-    import lib.main.response as response
 
     city = extract_city_from_query(query)
     if city:
@@ -559,23 +534,25 @@ def google_search(command: str):
 
     if query:
         speak(f"Searching {query} on Google")
-        webbrowser.open(f"https://www.google.com/search?q={query}")
+        webbrowser.open(
+            f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
+        )
     else:
-        import response
-
         speak(random.choice(response.google_search_failures))
 
 
 def get_news(limit=5):
-    import requests
-
     """
-    Fetch top headlines from NewsAPI (times of india source used in your prior code).
+    Fetch top headlines from NewsAPI (source set by config.NEWS_SOURCE).
     Returns list of articles (may be empty list on failure).
     """
     try:
-        url = f"http://newsapi.org/v2/top-headlines?sources=the-times-of-india&apiKey={config.NEWS_API_KEY}"
-        resp = requests.get(url, timeout=8)
+        resp = requests.get(
+            "https://newsapi.org/v2/top-headlines",
+            params={"sources": config.NEWS_SOURCE, "pageSize": limit},
+            headers={"X-Api-Key": config.NEWS_API_KEY},
+            timeout=8,
+        )
         resp.raise_for_status()
         data = resp.json()
         return data.get("articles", [])[:limit]
@@ -585,12 +562,12 @@ def get_news(limit=5):
 
 
 def get_random_news_for_speech():
-    from datetime import datetime
-
     """
     Pick one random article (from up to 5) and return a short, conversational string
     suitable for TTS. Never raises — returns friendly fallback on error.
     """
+    from datetime import datetime
+
     try:
         articles = get_news(limit=5)
         if not articles:
@@ -634,9 +611,7 @@ def get_random_news_for_speech():
 
 @eel.expose
 def repeat_after_me():
-    from lib.main.command import take_command_without_display, speak
-    from lib.main import response
-    import random
+    from lib.main.command import take_command_without_display
 
     speak(random.choice(response.copy_me_response))
     phrase = take_command_without_display()
@@ -650,7 +625,6 @@ def repeat_after_me():
 
 
 def get_system_status(query):
-    from lib.main.helper import normalize_units
     from lib.main.command import take_command, speak_with_display
     from lib.utils.system_info import (
         get_cpu_usage,
@@ -682,21 +656,24 @@ def get_system_status(query):
         "yeah",
     ]
 
+    def report(text):
+        # read the stat once (CPU sampling takes a second) and reuse it
+        speak_with_display(text, normalize_units(text))
+
+    def mentions(*words):
+        return any(re.search(rf"\b{w}\b", query) for w in words)
+
     try:
-        if "battery" in query:
-            speak_with_display(
-                get_battery_level(), normalize_units(get_battery_level())
-            )
-        elif "cpu" in query or "processor" in query:
-            speak_with_display(get_cpu_usage(), normalize_units(get_cpu_usage()))
-        elif "ram" in query or "memory" in query:
-            speak_with_display(get_memory_usage(), normalize_units(get_memory_usage()))
-        elif "disk" in query or "storage" in query:
-            speak_with_display(get_disk_usage(), normalize_units(get_disk_usage()))
-        elif "system" in query or "performance" in query:
-            speak_with_display(
-                get_system_summary(), normalize_units(get_system_summary())
-            )
+        if mentions("battery"):
+            report(get_battery_level())
+        elif mentions("cpu", "processor"):
+            report(get_cpu_usage())
+        elif mentions("ram", "memory"):
+            report(get_memory_usage())
+        elif mentions("disk", "storage"):
+            report(get_disk_usage())
+        elif mentions("system", "performance"):
+            report(get_system_summary())
         else:
             speak(
                 "Would you like to get the battery, cpu, ram, disk, and system information?"
@@ -704,9 +681,7 @@ def get_system_status(query):
             r = take_command()
             print(r)
             if r and any(word in r.lower() for word in affirmatives):
-                speak_with_display(
-                    get_system_summary(), normalize_units(get_system_summary())
-                )
+                report(get_system_summary())
             else:
                 ...
                 # speak(random.choice(response.cancel_responses))
@@ -716,12 +691,9 @@ def get_system_status(query):
 
 def wikipedia_search(topic):
     import wikipedia as wp
-    from lib.main.command import speak
-    from lib.main import response
 
     try:
-
-        res = wp.summary(topic, sentences=1)
+        res = wp.summary(topic.strip(), sentences=1)
         speak(res)
     except Exception as e:
 

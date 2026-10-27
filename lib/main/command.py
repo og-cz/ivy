@@ -1,12 +1,9 @@
 import random
 import re
-import time
 import traceback
-import audioop
+import numpy as np
 import pyttsx3
-import speech_recognition as sr
 import pyaudio
-import wave
 from faster_whisper import WhisperModel
 import os
 import eel
@@ -209,20 +206,19 @@ WHISPER_HALLUCINATIONS = {
 }
 
 
-def speak(text):
+_tts_engine = None
 
-    engine = pyttsx3.init()
 
-    engine.setProperty("rate", 174)
-
-    voices = engine.getProperty("voices")
-    engine.setProperty("voice", voices[1].id)
-
-    eel.DisplayMessage(text)
-    eel.receiverText(text)
-
-    engine.say(text)
-    engine.runAndWait()
+def _get_tts_engine():
+    # pyttsx3.init() is slow; build the engine once and reuse it
+    global _tts_engine
+    if _tts_engine is None:
+        _tts_engine = pyttsx3.init()
+        _tts_engine.setProperty("rate", 174)
+        voices = _tts_engine.getProperty("voices")
+        if len(voices) > 1:
+            _tts_engine.setProperty("voice", voices[1].id)
+    return _tts_engine
 
 
 def speak_with_display(display_text, speak_text):
@@ -230,22 +226,28 @@ def speak_with_display(display_text, speak_text):
     Display one message on screen, speak a different message via voice.
     Used when you want to show formatted numbers but speak words.
     """
-    engine = pyttsx3.init()
-
-    engine.setProperty("rate", 174)
-
-    voices = engine.getProperty("voices")
-    engine.setProperty("voice", voices[1].id)
-
     eel.DisplayMessage(display_text)
     eel.receiverText(speak_text)
 
+    engine = _get_tts_engine()
     engine.say(speak_text)
     engine.runAndWait()
 
 
+def speak(text):
+    speak_with_display(text, text)
+
+
+SAMPLE_RATE = 16000
+CHUNK = 1024
+
+
+def _rms(data):
+    samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+    return float(np.sqrt(np.mean(samples**2))) if samples.size else 0.0
+
+
 def record_audio(
-    filename="input.wav",
     ambient_sample_seconds=0.5,
     silence_factor=3.0,
     min_silence_threshold=300,
@@ -253,70 +255,57 @@ def record_audio(
     start_timeout=6.0,
     max_duration=15.0,
 ):
-
-    chunk = 1024
-    sample_format = pyaudio.paInt16
-    channels = 1
-    rate = 16000
-
+    """Record one utterance from the mic and return it as float32 samples."""
     p = pyaudio.PyAudio()
     stream = p.open(
-        format=sample_format,
-        channels=channels,
-        rate=rate,
+        format=pyaudio.paInt16,
+        channels=1,
+        rate=SAMPLE_RATE,
         input=True,
-        frames_per_buffer=chunk,
+        frames_per_buffer=CHUNK,
     )
 
-    # --- calibrate ambient RMS ---
-    frames_cal = []
-    calibr_chunks = int(rate / chunk * ambient_sample_seconds)
-    for _ in range(max(1, calibr_chunks)):
-        data = stream.read(chunk, exception_on_overflow=False)
-        frames_cal.append(data)
-    ambient_rms = audioop.rms(b"".join(frames_cal), 2)
-    # compute threshold from ambient rms but enforce a sensible minimum
-    silence_threshold = max(int(ambient_rms * silence_factor), min_silence_threshold)
-
-    eel.DisplayMessage(f"Listening...")
-    print(f"threshold={silence_threshold}")
-
     frames = []
-    silence_start = None
-    speech_started = False
-    started_at = time.time()
-
     try:
-        while True:
-            data = stream.read(chunk, exception_on_overflow=False)
-            frames.append(data)
+        # --- calibrate ambient RMS ---
+        calibr_chunks = max(1, int(SAMPLE_RATE / CHUNK * ambient_sample_seconds))
+        calibration = b"".join(
+            stream.read(CHUNK, exception_on_overflow=False)
+            for _ in range(calibr_chunks)
+        )
+        # compute threshold from ambient rms but enforce a sensible minimum
+        silence_threshold = max(
+            _rms(calibration) * silence_factor, min_silence_threshold
+        )
 
-            # compute instantaneous rms
-            rms = audioop.rms(data, 2)
+        eel.DisplayMessage("Listening...")
+        print(f"threshold={silence_threshold:.0f}")
+
+        chunk_seconds = CHUNK / SAMPLE_RATE
+        elapsed = 0.0
+        silent_for = 0.0
+        speech_started = False
+
+        while elapsed < max_duration:
+            data = stream.read(CHUNK, exception_on_overflow=False)
+            frames.append(data)
+            elapsed += chunk_seconds
 
             # --- debug line (uncomment during tuning) ---
-            # print(f"rms={rms}, threshold={silence_threshold}")
+            # print(f"rms={_rms(data):.0f}, threshold={silence_threshold:.0f}")
 
-            elapsed = time.time() - started_at
-            if elapsed > max_duration:
-                break
-
+            loud = _rms(data) >= silence_threshold
             if not speech_started:
                 # don't count the pause before the user starts talking as "done"
-                if rms >= silence_threshold:
+                if loud:
                     speech_started = True
                 elif elapsed > start_timeout:
                     break
                 continue
 
-            if rms < silence_threshold:
-                if silence_start is None:
-                    silence_start = time.time()
-                elif time.time() - silence_start > silence_duration:
-                    break
-            else:
-                # voice detected; reset silence timer
-                silence_start = None
+            silent_for = 0.0 if loud else silent_for + chunk_seconds
+            if silent_for > silence_duration:
+                break
 
         eel.DisplayMessage("Recognizing....")
     except Exception as e:
@@ -326,18 +315,16 @@ def record_audio(
         stream.close()
         p.terminate()
 
-    with wave.open(filename, "wb") as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(p.get_sample_size(sample_format))
-        wf.setframerate(rate)
-        wf.writeframes(b"".join(frames))
-
-    return filename
+    audio = np.frombuffer(b"".join(frames), dtype=np.int16)
+    return audio.astype(np.float32) / 32768.0
 
 
-def transcribe_audio(filename="input.wav"):
+def transcribe_audio(audio):
+    if audio.size == 0:
+        return ""
+
     segments, _ = model.transcribe(
-        filename,
+        audio,
         language="en",
         beam_size=5,
         vad_filter=True,  # drop silence/noise so Whisper doesn't make up words
@@ -348,8 +335,6 @@ def transcribe_audio(filename="input.wav"):
     text = " ".join(
         segment.text.strip() for segment in segments if segment.no_speech_prob < 0.6
     ).strip()
-    if os.path.exists(filename):
-        os.remove(filename)
 
     # strip trailing punctuation Whisper adds ("Open YouTube." -> "Open YouTube")
     text = text.rstrip(".!?,")
@@ -361,10 +346,7 @@ def transcribe_audio(filename="input.wav"):
 # THE CORE CONNECTION OF ALL COMMANDS
 @eel.expose
 def take_command():
-    # eel.DisplayMessage("Hello, I am Ivy")
-    # eel.sleep(1.0)
-    file = record_audio()
-    query = transcribe_audio(file)
+    query = transcribe_audio(record_audio())
     eel.DisplayMessage(query)
 
     # brief pause so the user can see what was heard; eel.sleep keeps the UI responsive
@@ -374,11 +356,7 @@ def take_command():
 
 
 def take_command_without_display():
-
-    file = record_audio()
-    query = transcribe_audio(file)
-
-    return query
+    return transcribe_audio(record_audio())
 
 
 # core logic for all commands
@@ -565,19 +543,17 @@ def all_commands(message=1) -> str:
             speak(conversation_response)
             return
 
-        # # ===== PRIORITY 3: UNKNOWN QUERY =====
+        # ===== PRIORITY 3: UNKNOWN QUERY =====
 
-        # friendly_responses = [
-        #     "Hmm, I'm not sure how to help with that. Want to try something else?",
-        #     "I didn't quite catch that. Could you rephrase it?",
-        #     "That's a new one for me! Try asking me to open an app, check the weather, or tell you a joke!",
-        # ]
-        # speak(random.choice(friendly_responses))
-        # print(f"Unknown query: {query!r}")
+        friendly_responses = [
+            "Hmm, I'm not sure how to help with that. Want to try something else?",
+            "I didn't quite catch that. Could you rephrase it?",
+            "That's a new one for me! Try asking me to open an app, check the weather, or tell you a joke!",
+        ]
+        speak(random.choice(friendly_responses))
+        print(f"Unknown query: {query!r}")
 
     except Exception as e:
-        from lib.main import response
-
         print("Error in all_commands:", e)
         traceback.print_exc()
         speak(random.choice(response.error_in_allcommands))
@@ -591,109 +567,11 @@ def all_commands(message=1) -> str:
 
 
 def check_mic_to_use():
-    for index, name in enumerate(sr.Microphone.list_microphone_names()):
-        print(
-            'Microphone with name "{1}" found for `Microphone(device_index={0})`'.format(
-                index, name
-            )
-        )
-
-
-""" _disabled_
-
-def take_command_vosk():
-    r = sr.Recognizer()
-
-    with sr.Microphone() as source:
-        print("listening...")
-        eel.DisplayMessage("listening...")
-        r.adjust_for_ambient_noise(source, duration=0.5)
-        try:
-            audio = r.listen(source, timeout=10)
-        except sr.WaitTimeoutError:
-            print("Timeout waiting for speech.")
-            return ""
-
+    p = pyaudio.PyAudio()
     try:
-        print("recognizing")
-        eel.DisplayMessage("recognizing....")
-
-        # reuse the same model
-        rec = KaldiRecognizer(model, 16000)
-        rec.AcceptWaveform(audio.get_raw_data(convert_rate=16000, convert_width=2))
-        result = json.loads(rec.Result())
-
-        query = result.get("text", "").strip()
-        if not query:
-            eel.DisplayMessage("Could not understand, please try again.")
-            eel.sleep(3.5)
-            eel.ShowHood()
-            return ""
-
-        eel.DisplayMessage(query)
-        eel.sleep(3.5)
-        eel.ShowHood()
-        return query.lower()
-
-    except Exception as e:
-        print("Recognition error:", e)
-        eel.DisplayMessage(f"Error: {e}")
-        eel.sleep(3.5)
-        eel.ShowHood()
-        return ""
-
-
-# backup a bruteforce way if sr.recognize function is not working
-def take_command_force(device_index=None):
-       
-        Brute-force listen-and-recognize loop using Vosk/Kaldi.
-
-        under the hood version for speech recognition sr.recognize_vosk() -> str
-        if it that function is not available we can use this
-
-        Args:
-            device_index (int|None): optional microphone device index for sr.Microphone
-
-        Returns:
-            str: recognized text in lowercase, or "" if the model folder is missing.
- 
-    model_dir = "machine-learning/vosk-model-en-us-0.22-lgraph"
-    if not os.path.isdir(model_dir):
-        print(f"Model folder not found: {model_dir}")
-        print("Download a Vosk model and extract it there.")
-        return ""
-    model = Model(model_dir)
-
-    r = sr.Recognizer()
-    r.pause_threshold = 0.7
-    r.dynamic_energy_threshold = True
-
-    try:
-        with sr.Microphone(device_index=device_index) as source:
-            r.adjust_for_ambient_noise(source, duration=0.5)
-            print("Listening...")
-            audio = r.listen(source, timeout=10, phrase_time_limit=6)
-    except sr.WaitTimeoutError:
-        print("No speech detected (timeout).")
-        return ""
-    except OSError as e:
-        print(f"Microphone error: {e}")
-        return ""
-
-    try:
-        print("Recognizing...")
-        rec = KaldiRecognizer(model, 16000)
-        raw = audio.get_raw_data(convert_rate=16000, convert_width=2)
-        if rec.AcceptWaveform(raw):
-            data = json.loads(rec.Result())
-        else:
-            data = json.loads(rec.FinalResult())
-        text = data.get("text", "").strip()
-        return text.lower()
-    except json.JSONDecodeError:
-        print("JSON parse error.")
-    except Exception as e:
-        print(f"Recognition error: {e}")
-    return ""
-
-"""
+        for index in range(p.get_device_count()):
+            info = p.get_device_info_by_index(index)
+            if info.get("maxInputChannels", 0) > 0:
+                print(f'Microphone "{info["name"]}" found at device_index={index}')
+    finally:
+        p.terminate()

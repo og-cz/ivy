@@ -1,86 +1,90 @@
-from sys import flags
 import time
 import cv2
-import pyautogui as p
+
+TRAINER_PATH = "lib/auth/trainer/trainer.yml"
+CASCADE_PATH = "lib/auth/haarcascade_frontalface_default.xml"
+
+# LBPH distance: 0 is a perfect match, lower is stricter
+MATCH_THRESHOLD = 100
+TIMEOUT_SECONDS = 30
 
 
 def AuthenticateFace():
 
-    flag = ""
+    flag = 0
     # Local Binary Patterns Histograms
     recognizer = cv2.face.LBPHFaceRecognizer_create()
 
-    recognizer.read("lib\\auth\\trainer\\trainer.yml")  # load trained model
-    cascadePath = "lib\\auth\\haarcascade_frontalface_default.xml"
+    recognizer.read(TRAINER_PATH)  # load trained model
     # initializing haar cascade for object detection approach
-    faceCascade = cv2.CascadeClassifier(cascadePath)
+    faceCascade = cv2.CascadeClassifier(CASCADE_PATH)
 
     font = cv2.FONT_HERSHEY_SIMPLEX  # denotes the font type
-
-    id = 2  # number of persons you want to Recognize
 
     names = [
         "",
         "Carl Zeus",
     ]  # names, leave first empty bcz counter starts from 0
 
-    cam = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # cv2.CAP_DSHOW to remove warning
-    cam.set(3, 640)  # set video FrameWidht
-    cam.set(4, 480)  # set video FrameHeight
+    # cv2.CAP_DSHOW removes a warning on Windows; other platforms use the default backend
+    backend = cv2.CAP_DSHOW if hasattr(cv2, "CAP_DSHOW") else cv2.CAP_ANY
+    cam = cv2.VideoCapture(0, backend)
+    cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     # Define min window size to be recognized as a face
-    minW = 0.1 * cam.get(3)
-    minH = 0.1 * cam.get(4)
+    minW = 0.1 * cam.get(cv2.CAP_PROP_FRAME_WIDTH)
+    minH = 0.1 * cam.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-    # flag = True
+    deadline = time.time() + TIMEOUT_SECONDS
 
-    while True:
+    try:
+        while time.time() < deadline:
 
-        ret, img = cam.read()  # read the frames using the above created object
+            ret, img = cam.read()  # read the frames using the above created object
+            if not ret or img is None:
+                # camera busy or not ready yet
+                cv2.waitKey(50)
+                continue
 
-        # The function converts an input image from one color space to another
-        converted_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # The function converts an input image from one color space to another
+            converted_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        faces = faceCascade.detectMultiScale(
-            converted_image,
-            scaleFactor=1.2,
-            minNeighbors=5,
-            minSize=(int(minW), int(minH)),
-        )
-
-        for x, y, w, h in faces:
-
-            # used to draw a rectangle on any image
-            cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-            # to predict on every single image
-            id, accuracy = recognizer.predict(converted_image[y : y + h, x : x + w])
-
-            # Check if accuracy is less them 100 ==> "0" is perfect match
-            if accuracy < 100:
-                id = names[id]
-                accuracy = "  {0}%".format(round(100 - accuracy))
-                flag = 1
-            else:
-                id = "unknown"
-                accuracy = "  {0}%".format(round(100 - accuracy))
-                flag = 0
-
-            cv2.putText(img, str(id), (x + 5, y - 5), font, 1, (255, 255, 255), 2)
-            cv2.putText(
-                img, str(accuracy), (x + 5, y + h - 5), font, 1, (255, 255, 0), 1
+            faces = faceCascade.detectMultiScale(
+                converted_image,
+                scaleFactor=1.2,
+                minNeighbors=5,
+                minSize=(int(minW), int(minH)),
             )
 
-        cv2.imshow("camera", img)
+            for x, y, w, h in faces:
 
-        k = cv2.waitKey(10) & 0xFF  # Press 'ESC' for exiting video
-        if k == 27:
-            break
-        if flag == 1:
-            break
+                # used to draw a rectangle on any image
+                cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-    # Do a bit of cleanup
+                # to predict on every single image
+                id, distance = recognizer.predict(converted_image[y : y + h, x : x + w])
 
-    cam.release()
-    cv2.destroyAllWindows()
+                if distance < MATCH_THRESHOLD and id < len(names):
+                    label = names[id]
+                    flag = 1
+                else:
+                    label = "unknown"
+                accuracy = "  {0}%".format(round(100 - distance))
+
+                cv2.putText(img, label, (x + 5, y - 5), font, 1, (255, 255, 255), 2)
+                cv2.putText(
+                    img, accuracy, (x + 5, y + h - 5), font, 1, (255, 255, 0), 1
+                )
+
+            cv2.imshow("camera", img)
+
+            k = cv2.waitKey(10) & 0xFF  # Press 'ESC' for exiting video
+            if k == 27 or flag == 1:
+                break
+    finally:
+        # Do a bit of cleanup
+        cam.release()
+        cv2.destroyAllWindows()
+
     return flag

@@ -25,31 +25,45 @@ $(document).ready(function () {
     // animateOvalContainer();
   }
 
-  eel.expose(senderText);
-  function senderText(message) {
+  // show the listening wave (used when "Hey Ivy" is heard)
+  eel.expose(ShowSiriWave);
+  function ShowSiriWave() {
+    $("#Oval").attr("hidden", true);
+    $("#SiriWave").attr("hidden", false);
+  }
+
+  // chat text comes from speech and the news API, so never treat it as HTML
+  function escapeHtml(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  // insertAdjacentHTML appends without re-parsing the whole chat history
+  function appendChat(className, justify, message) {
     var chatBox = document.getElementById("chat-canvas-body");
     if (message.trim() !== "") {
-      chatBox.innerHTML += `<div class="row justify-content-end mb-4">
+      chatBox.insertAdjacentHTML(
+        "beforeend",
+        `<div class="row ${justify} mb-4">
             <div class = "width-size">
-            <div class="sender_message">${message}</div>
-        </div>`;
+            <div class="${className}">${escapeHtml(message)}</div>
+            </div>
+        </div>`
+      );
 
       chatBox.scrollTop = chatBox.scrollHeight;
     }
   }
 
+  eel.expose(senderText);
+  function senderText(message) {
+    appendChat("sender_message", "justify-content-end", message);
+  }
+
   eel.expose(receiverText);
   function receiverText(message) {
-    var chatBox = document.getElementById("chat-canvas-body");
-    if (message.trim() !== "") {
-      chatBox.innerHTML += `<div class="row justify-content-start mb-4">
-            <div class = "width-size">
-            <div class="receiver_message">${message}</div>
-            </div>
-        </div>`;
-
-      chatBox.scrollTop = chatBox.scrollHeight;
-    }
+    appendChat("receiver_message", "justify-content-start", message);
   }
 
   // Hide Loader and display Face Auth animation
