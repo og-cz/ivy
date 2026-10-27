@@ -1,4 +1,5 @@
 import random
+import re
 import time
 import traceback
 import audioop
@@ -157,16 +158,55 @@ system_keywords = [
     "check system",
 ]
 
-# load model
+
+def has_keyword(text, keywords):
+    """Whole-word/phrase match, so "now" won't fire on "know" or "ram" on "program"."""
+    return any(re.search(r"\b" + re.escape(kw) + r"\b", text) for kw in keywords)
+
+
+NUMBER_PATTERN = re.compile(
+    r"\d|\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|"
+    r"forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million)\b"
+)
+
+
+def is_math_query(text):
+    # "what's" alone is too broad ("what's your name"), so it needs a number with it
+    strong = [kw for kw in math_keywords if kw not in ("whats", "what's")]
+    if has_keyword(text, strong):
+        return True
+    return has_keyword(text, ["whats", "what's", "what is"]) and bool(
+        NUMBER_PATTERN.search(text)
+    )
+
+
+# load model (int8 is much faster on CPU with almost no accuracy loss)
 if os.path.exists(config.MODEL_DIR):
-    model = WhisperModel("machine-learning/faster-whisper-small.en/", device="cpu")
+    model = WhisperModel(config.MODEL_DIR, device="cpu", compute_type="int8")
     print(f"Model folder loaded: {config.MODEL_DIR}")
 elif os.path.exists(config.MODEL_BACKUP):
-    model = WhisperModel("model/", device="cpu")
+    model = WhisperModel(config.MODEL_BACKUP, device="cpu", compute_type="int8")
     print("Model loaded successfully!")
 else:
-    model = WhisperModel("small.en", device="cpu")
+    model = WhisperModel("small.en", device="cpu", compute_type="int8")
     print("Model loaded successfully!")
+
+# words Whisper tends to mishear; biasing the decoder toward them helps
+WHISPER_PROMPT = (
+    "Ivy, open YouTube, Google, Wikipedia, WhatsApp, weather, news, "
+    "battery, CPU, calculate, send a message, video call."
+)
+
+# phrases Whisper invents when it hears silence or noise
+WHISPER_HALLUCINATIONS = {
+    "you",
+    "thank you",
+    "thanks for watching",
+    "thank you for watching",
+    "bye",
+    "okay",
+}
 
 
 def speak(text):
@@ -209,7 +249,9 @@ def record_audio(
     ambient_sample_seconds=0.5,
     silence_factor=3.0,
     min_silence_threshold=300,
-    silence_duration=2.0,
+    silence_duration=1.0,
+    start_timeout=6.0,
+    max_duration=15.0,
 ):
 
     chunk = 1024
@@ -241,6 +283,8 @@ def record_audio(
 
     frames = []
     silence_start = None
+    speech_started = False
+    started_at = time.time()
 
     try:
         while True:
@@ -253,15 +297,28 @@ def record_audio(
             # --- debug line (uncomment during tuning) ---
             # print(f"rms={rms}, threshold={silence_threshold}")
 
+            elapsed = time.time() - started_at
+            if elapsed > max_duration:
+                break
+
+            if not speech_started:
+                # don't count the pause before the user starts talking as "done"
+                if rms >= silence_threshold:
+                    speech_started = True
+                elif elapsed > start_timeout:
+                    break
+                continue
+
             if rms < silence_threshold:
                 if silence_start is None:
                     silence_start = time.time()
                 elif time.time() - silence_start > silence_duration:
-                    eel.DisplayMessage("Recognizing....")
                     break
             else:
                 # voice detected; reset silence timer
                 silence_start = None
+
+        eel.DisplayMessage("Recognizing....")
     except Exception as e:
         print("Recording error:", e)
     finally:
@@ -279,10 +336,25 @@ def record_audio(
 
 
 def transcribe_audio(filename="input.wav"):
-    segments, _ = model.transcribe(filename)
-    text = " ".join([segment.text for segment in segments])
+    segments, _ = model.transcribe(
+        filename,
+        language="en",
+        beam_size=5,
+        vad_filter=True,  # drop silence/noise so Whisper doesn't make up words
+        vad_parameters={"min_silence_duration_ms": 500},
+        condition_on_previous_text=False,
+        initial_prompt=WHISPER_PROMPT,
+    )
+    text = " ".join(
+        segment.text.strip() for segment in segments if segment.no_speech_prob < 0.6
+    ).strip()
     if os.path.exists(filename):
         os.remove(filename)
+
+    # strip trailing punctuation Whisper adds ("Open YouTube." -> "Open YouTube")
+    text = text.rstrip(".!?,")
+    if text.lower() in WHISPER_HALLUCINATIONS:
+        return ""
     return text
 
 
@@ -295,8 +367,8 @@ def take_command():
     query = transcribe_audio(file)
     eel.DisplayMessage(query)
 
-    sleep_time = min(max(2, 0.4 * len(query.split())), 6)
-    time.sleep(sleep_time)
+    # brief pause so the user can see what was heard; eel.sleep keeps the UI responsive
+    eel.sleep(0.6)
 
     return query
 
@@ -305,9 +377,6 @@ def take_command_without_display():
 
     file = record_audio()
     query = transcribe_audio(file)
-
-    sleep_time = min(max(2, 0.4 * len(query.split())), 6)
-    time.sleep(sleep_time)
 
     return query
 
@@ -331,7 +400,6 @@ def all_commands(message=1) -> str:
 
         # if no voice
         if len(query) < 2:
-            import response
 
             speak(random.choice(response.cannot_understand_user))
             return
@@ -339,7 +407,7 @@ def all_commands(message=1) -> str:
         # ===== PRIORITY 1: CORE COMMANDS =====
 
         # OPEN COMMAND - Must check first
-        if "open" in q and not is_youtube_query(query):
+        if has_keyword(q, ["open"]) and not is_youtube_query(query):
             # Make sure it's not "open [something] on youtube"
             from lib.main.features import open_command
 
@@ -397,28 +465,28 @@ def all_commands(message=1) -> str:
             return
 
         # LET IVY REPEAT YOUR WORDS
-        if any(kw in q for kw in copy_me_keywords):
+        if has_keyword(q, copy_me_keywords):
             from lib.main.features import repeat_after_me
 
             repeat_after_me()
             return
 
         # GET SYSTEM INFO
-        if any(kw in q for kw in system_keywords):
+        if has_keyword(q, system_keywords):
             from lib.main.features import get_system_status
 
             get_system_status(query)
             return
 
         # TIME & DATE
-        if any(kw in q for kw in time_date_keywords):
+        if has_keyword(q, time_date_keywords):
             from lib.main.features import get_time_date
 
             speak(get_time_date(query))
             return
 
         # GET SOME NEWS
-        if any(kw in q for kw in news_keywords) and not (
+        if has_keyword(q, news_keywords) and not (
             "youtube" in q or "google" in q
         ):
             from lib.main.features import get_random_news_for_speech
@@ -426,7 +494,6 @@ def all_commands(message=1) -> str:
             try:
                 speak(get_random_news_for_speech())
             except Exception as e:
-                import response
 
                 print("Error while handling news command:", e)
                 traceback.print_exc()
@@ -434,7 +501,7 @@ def all_commands(message=1) -> str:
             return
 
         # MATH CALCULATIONS
-        if any(kw in q for kw in math_keywords):
+        if is_math_query(q):
             from lib.math.calculator import calculate
 
             result = calculate(query)
@@ -452,7 +519,7 @@ def all_commands(message=1) -> str:
             return
 
         # WHATSAPP
-        if any(kw in q for kw in message_keywords + call_keywords):
+        if has_keyword(q, message_keywords + call_keywords):
             from lib.main.features import findContact, whatsApp
             import re
 
